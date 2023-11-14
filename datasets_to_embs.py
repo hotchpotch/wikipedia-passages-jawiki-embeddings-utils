@@ -9,7 +9,11 @@ import argparse
 from pathlib import Path
 from datasets import load_dataset
 
-parser = argparse.ArgumentParser(description="Convert datasets to embeddings")
+parser = argparse.ArgumentParser(
+    description="Convert datasets to embeddings",
+formatter_class=argparse.ArgumentDefaultsHelpFormatter
+)
+
 parser.add_argument(
     "-t",
     "--target_dataset",
@@ -46,7 +50,7 @@ parser.add_argument(
     type=str,
     required=False,
     default="",
-    help="prefix string for passage",
+    help="prefix string for passage, ' or 'query: ' or 'passage: ' or 'prefix-foo-bar: '",
 )
 parser.add_argument(
     "--passage_template",
