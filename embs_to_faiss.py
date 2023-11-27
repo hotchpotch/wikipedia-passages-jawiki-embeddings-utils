@@ -26,43 +26,20 @@ parser.add_argument(
 )
 # m
 parser.add_argument(
-    "-m",
-    "--m",
-    type=int,
+    "-f",
+    "--factory",
+    type=str,
     required=False,
-    default=32,
-    help="faiss param: m, subvector",
+    default="IVF2048,PQ96",
+    help="faiss index_factory() option",
 )
-# mbit
-parser.add_argument(
-    "-b",
-    "--mbit",
-    type=int,
-    required=False,
-    default=8,
-    help="faiss param: mbit, bits_per_idx",
-)
-# nlist
-parser.add_argument(
-    "-n",
-    "--nlist",
-    type=int,
-    required=False,
-    default=512,
-    help="faiss param: nlist",
-)
+
 # use_gpu
 parser.add_argument(
     "-g",
     "--use_gpu",
     action="store_true",
     help="use gpu",
-)
-# no quantization
-parser.add_argument(
-    "--flat-l2",
-    action="store_true",
-    help="use FlatL2, no quantization",
 )
 # force override
 parser.add_argument(
@@ -72,23 +49,6 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
-
-@dataclass
-class FaissConfig:
-    m: int = 32  # subvector
-    mbit: int = 8  # bits_per_idx
-    nlist: int = 512  # nlist
-    flat_l2: bool = True
-
-
-args = parser.parse_args()
-
-faiss_config = FaissConfig(
-    m=args.m,
-    mbit=args.mbit,
-    nlist=args.nlist,
-    flat_l2=args.flat_l2,
-)
 
 working_path = Path(args.working_dir)
 # not found
@@ -107,66 +67,29 @@ else:
     print(f"input {len(embs_npz)} embs(*.npz) found: {target_embs_path}")
 
 
-def get_index_filename(config: FaissConfig) -> str:
-    if config.flat_l2:
-        return f"index_flat_l2.faiss"
-    return f"index_m{config.m}_mbit{config.mbit}_nlist{config.nlist}.faiss"
+def get_index_filename(factory_name: str) -> str:
+    factory_name = factory_name.replace(",", "_")
+    return f"index_{factory_name}.faiss"
 
 
-def gen_faiss_index(config: FaissConfig, dim: int, use_gpu: bool):
-    if use_gpu and config.m > 48:
-        return gen_faiss_index_f16_lookup(config, dim, use_gpu)
-    # quantizer = faiss.IndexFlatL2(dim)
-    if config.flat_l2:
-        faiss_index = faiss.IndexFlatL2(dim)
-    else:
-        # faiss_index = faiss.IndexHNSWSQ(dim, faiss.ScalarQuantizer.QT_8bit, 16)
-        # faiss_index.hnsw.efConstruction = 512
-        # index.hnsw.efSearch = 128
-        # quantizer = faiss.IndexHNSWFlat(dim, 32)
-        quantizer = faiss.IndexFlatL2(dim)
-
-        faiss_index = faiss.IndexIVFPQ(
-            quantizer,
-            dim,
-            config.nlist,
-            config.m,
-            config.mbit,
-        )
-        # faiss_index = faiss.IndexIVFFlat(quantizer, dim, 16384)
-        # faiss_index.cp.min_points_per_centroid = 5  # quiet warning
-        # faiss_index.quantizer_trains_alone = 2
-    if use_gpu and getattr(faiss, "StandardGpuResources", None):
+def gen_faiss_index(factory_name: str, dim: int, use_gpu: bool):
+    faiss_index = faiss.index_factory(dim, factory_name)
+    if use_gpu:  # and getattr(faiss, "StandardGpuResources", None):
         gpu_res = faiss.StandardGpuResources()
-        faiss_index = faiss.index_cpu_to_gpu(gpu_res, 0, faiss_index)
+        co = faiss.GpuClonerOptions()
+        # here we are using a over 64-byte PQ, so we must set the lookup tables to
+        # 16 bit float (this is due to the limited temporary memory).
+        co.useFloat16 = True
+        faiss_index = faiss.index_cpu_to_gpu(gpu_res, 0, faiss_index, co)
         return faiss_index
     else:
         return faiss_index
-
-
-def gen_faiss_index_f16_lookup(config: FaissConfig, dim: int, use_gpu: bool):
-    # use float16 lookup tables
-    gpu_resource = faiss.StandardGpuResources()  # GPUリソースの初期化
-    gpu_index_config = faiss.GpuIndexIVFPQConfig()  # IVFPQインデックスの設定用オブジェクト
-    gpu_index_config.useFloat16LookupTables = True  # Float16ルックアップテーブルを使用する
-    quantizer = faiss.IndexFlatL2(dim)  # 量子化器の定義
-    index = faiss.GpuIndexIVFPQ(
-        gpu_resource,
-        # quantizer,
-        dim,
-        config.nlist,
-        config.m,
-        config.mbit,
-        faiss.METRIC_L2,
-        gpu_index_config,  # IVFPQインデックスの設定用オブジェクト
-    )  # GPU上のIVFPQインデックスの作成
-    return index
 
 
 output_faiss_path = (
     working_path.joinpath("faiss_indexes")
     .joinpath(args.target_embs_name)
-    .joinpath(get_index_filename(faiss_config))
+    .joinpath(get_index_filename(args.factory))
 )
 
 output_faiss_path.parent.mkdir(parents=True, exist_ok=True)
@@ -194,14 +117,9 @@ del all_embs
 
 # if idx == 0:
 dim = embs.shape[1]
-if faiss_config.nlist is None:
-    faiss_config.nlist = int(np.sqrt(len(embs) * (len(embs_npz) - 1)))
-    if faiss_config.nlist < 1:
-        faiss_config.nlist = 100
-print(f"faiss_config: {faiss_config}")
 if args.use_gpu:
     print("use gpu for faiss index")
-faiss_index = gen_faiss_index(faiss_config, dim, args.use_gpu)
+faiss_index = gen_faiss_index(args.factory, dim, args.use_gpu)
 print(f"start training faiss index, shape: {embs.shape}")
 faiss_index.train(embs)  # type: ignore
 print(f"start adding embs to faiss index")
