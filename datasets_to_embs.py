@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from typing import Generator
 import numpy as np
 from sentence_transformers import SentenceTransformer
+from hf_hub_ctranslate2 import CT2SentenceTransformer
+
 from tqdm import tqdm
 import torch
 import argparse
@@ -143,8 +145,11 @@ working_dir_embs_path.mkdir(parents=True, exist_ok=True)
 
 print("output embs path:", working_dir_embs_path)
 
-MODEL = SentenceTransformer(emb_config.model_name)
-MODEL.max_seq_length = emb_config.max_seq_length
+if "-e5-" in emb_config.model_name:
+    MODEL = CT2SentenceTransformer(emb_config.model_name, compute_type="float16")
+else:
+    MODEL = SentenceTransformer(emb_config.model_name)
+MODEL.max_seq_length = emb_config.max_seq_length  # type: ignore
 
 
 def to_embs(
@@ -154,7 +159,7 @@ def to_embs(
     for text in texts:
         group.append(text)
         if len(group) == group_size:
-            embeddings = model.encode(
+            embeddings = model.encode(  # type: ignore
                 group,
                 normalize_embeddings=True,
                 show_progress_bar=False,
@@ -162,7 +167,7 @@ def to_embs(
             yield embeddings  # type: ignore
             group = []
     if len(group) > 0:
-        embeddings = model.encode(
+        embeddings = model.encode(  # type: ignore
             group, normalize_embeddings=True, show_progress_bar=False
         )
         yield embeddings  # type: ignore
