@@ -58,7 +58,7 @@ parser.add_argument(
     "--passage_template",
     type=str,
     required=False,
-    default="# {title}\n\n## {section}\n\n{text} ",
+    default="# {title}\n\n## {section}\n\n### {text}",
     help="template for passage, {title}, {section}, {text} are replaced",
 )
 # max_seq_length
@@ -100,9 +100,7 @@ if "-e5-" in args.model_name:
     if args.passage_prefix not in passage_prefixes_e5:
         raise ValueError("passage_prefix should be one of", passage_prefixes_e5)
 
-target_ds = load_dataset(
-    args.target_dataset, "passages-c400-jawiki-20230403", split="train"
-)
+target_ds = load_dataset(args.target_dataset, args.name, split="train")
 
 
 def data_to_passage(data, template=TEMPLATE, prefix=PASSAGE_PREFIX):
