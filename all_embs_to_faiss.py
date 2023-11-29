@@ -1,13 +1,19 @@
 """
 working_dir から、対象のembsに対して、同じオプションのIndexを作成する
-$ python all_embs_to_faiss.py -w $WORKING_DIR --use_gpu -f "IVF2048,PQ96"
+-f オプションのPQの値は dim から自動で選ばれる
+$ python all_embs_to_faiss.py -w $WORKING_DIR --use_gpu
 
 """
+
+# ToDo: dim をみてPQをセットする?
 
 import argparse
 import subprocess
 import sys
+import numpy as np
 from pathlib import Path
+
+IVF_NLIST = 2048
 
 
 def parse_args():
@@ -23,7 +29,7 @@ def parse_args():
     return args.working_dir, unknown_args
 
 
-def run_subprocess(working_dir, target_embs_name, other_args):
+def run_subprocess(working_dir, target_embs_name, other_args, ivf_nlist, pq):
     args = [
         "python",
         "embs_to_faiss.py",
@@ -31,6 +37,8 @@ def run_subprocess(working_dir, target_embs_name, other_args):
         working_dir,
         "-t",
         target_embs_name,
+        "-f",
+        f"IVF{ivf_nlist},PQ{pq}",
     ] + other_args
     print(f"args: {args}")
 
@@ -45,6 +53,22 @@ if __name__ == "__main__":
     # unique
     dirs = list(set(dirs))
     for d in dirs:
+        # d/0.npz を取得
+        npz_file = d / "0.npz"
+        if not npz_file.exists():
+            print(f"{npz_file} is not exists")
+            continue
+        # npz_file から、shape を取得
+        with np.load(npz_file) as data:
+            e = data["embs"]
+        dim = e.shape[1]
+
         target_embs_name = "/".join(str(d).split("/")[-2:])
         print(f"target_embs_name: {target_embs_name}")
-        run_subprocess(working_dir, target_embs_name, other_args)
+        run_subprocess(
+            working_dir,
+            target_embs_name,
+            other_args,
+            ivf_nlist=IVF_NLIST,
+            pq=int(dim / 4),
+        )
