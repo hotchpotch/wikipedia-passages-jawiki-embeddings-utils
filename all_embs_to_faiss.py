@@ -5,8 +5,6 @@ $ python all_embs_to_faiss.py -w $WORKING_DIR --use_gpu
 
 """
 
-# ToDo: dim をみてPQをセットする?
-
 import argparse
 import subprocess
 import sys
