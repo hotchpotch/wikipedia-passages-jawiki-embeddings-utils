@@ -13,8 +13,16 @@ wikipedia 日本語の文を、各種日本語の embeddings や faiss index へ
 
 - https://huggingface.co/datasets/hotchpotch/wikipedia-passages-jawiki-embeddings
 
+## Web UI の実行例
 
-## 使い方 - 例
+```
+cd streamlit_qa_app
+pip install -r requirements.txt
+streamlit run app.py --server.address 0.0.0.0
+```
+
+
+## 変換例
 
 ```
 export WORKING_DIR=/home/hotchpotch/src/huggingface.co/datasets/hotchpotch/wikipedia-passages-jawiki-embeddings/
