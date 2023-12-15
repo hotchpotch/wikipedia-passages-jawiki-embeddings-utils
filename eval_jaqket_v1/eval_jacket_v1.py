@@ -1,3 +1,9 @@
+"""
+jaqket v1 のデータセットを使って Q&A 回答の評価
+
+$ python eval_jaqket_v1/eval_jacket_v1.py -k 5
+"""
+
 from __future__ import annotations
 
 import os
@@ -142,23 +148,30 @@ def load_jaqket_v1(urls):
     return res
 
 
-def find_label_by_indexes(idxs, jaqket: JaqketQuestionV1, wiki_ds):
+def find_label_by_indexes(idxs, jaqket: JaqketQuestionV1, wiki_ds) -> int:
+    INT_MAX = 2**31 - 1
+    answer_candidates = jaqket.answer_candidates
+    candidate_found_indexes = []
+    titles = []
+    texts = []
     for idx in idxs:
         data = wiki_ds[idx]
         title = data["title"]
-        # まずは title が jaqket の answer_candidates に完全一致するか
-        for j, candidate in enumerate(jaqket.answer_candidates):
-            if candidate == title:
-                return j
-
-    for idx in idxs:
-        data = wiki_ds[idx]
         text = data["text"]
-        # 次に text が jaqket の answer_candidates に含まれているか
-        for j, candidate in enumerate(jaqket.answer_candidates):
-            if candidate in text:
-                return j
-    return -1
+        titles.append(title)
+        texts.append(text)
+    target_text = " ".join(titles + texts)
+    for candidate in answer_candidates:
+        pos = target_text.find(candidate)
+        if pos == -1:
+            candidate_found_indexes.append(INT_MAX)
+        else:
+            candidate_found_indexes.append(pos)
+    min_index = min(candidate_found_indexes)
+    if min_index == INT_MAX:
+        return -1
+    else:
+        return candidate_found_indexes.index(min_index)
 
 
 def predict_by_indexes(indexes, jaqket_ds, wiki_ds):
@@ -180,14 +193,15 @@ print("load wikija datasets")
 ds = get_wikija_ds()
 
 jacket_v1_dev = load_jaqket_v1(JAQKET_V1_DEV_URLS)
-jacket_v1_train = load_jaqket_v1(JAQKET_V1_TRAIN_URLS)
+# jacket_v1_train = load_jaqket_v1(JAQKET_V1_TRAIN_URLS)
 
 if parsed_args.debug:
     print("RUN: debug mode")
     jacket_v1_dev = jacket_v1_dev[:100]
-    jacket_v1_train = jacket_v1_train[:100]
+    # jacket_v1_train = jacket_v1_train[:100]
 
-jacket_v1 = {"train": jacket_v1_train, "dev": jacket_v1_dev}
+jacket_v1 = {"dev": jacket_v1_dev}
+# jacket_v1 = {"train": jacket_v1_train, "dev": jacket_v1_dev}
 
 if parsed_args.emb_model_name:
     target_emb_models = [parsed_args.emb_model_name]
@@ -199,7 +213,7 @@ use_gpu = parsed_args.use_gpu
 
 results = []
 
-for emb_model_name in EMB_MODEL_NAMES:
+for emb_model_name in target_emb_models:
     if "-e5-" in emb_model_name:
         query_passage = ["query", "passage"]
     else:
@@ -220,6 +234,7 @@ for emb_model_name in EMB_MODEL_NAMES:
             # 検索するための prefix は元データが passage でも "query: " を指定する
             search_text_prefix = f"query: "
         else:
+            # e5 以外のモデルは prefix なし
             search_text_prefix = ""
         emb_model_pq = EMB_MODEL_PQ[emb_model_name]
         print(f"\n\n--- {name} ---")
@@ -228,7 +243,7 @@ for emb_model_name in EMB_MODEL_NAMES:
         index_name = f"{index_emb_model_name}/index_IVF2048_PQ{emb_model_pq}.faiss"
         faiss_index = get_faiss_index(index_name, use_gpu=use_gpu)
 
-        for target_split_name in ["train", "dev"]:
+        for target_split_name in jacket_v1.keys():
             jaqket = jacket_v1[target_split_name]
             print("gen embs: ", target_split_name)
             question_embs, gen_embs_sec = texts_to_embs(
