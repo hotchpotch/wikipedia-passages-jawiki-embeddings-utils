@@ -92,7 +92,7 @@ def get_faiss_index(
         # 16 bit float (this is due to the limited temporary memory).
         co.useFloat16 = True
         faiss_index = faiss.index_cpu_to_gpu(gpu_res, 0, faiss_index, co)
-    faiss_index.nprobe = 512
+    faiss_index.nprobe = 256
     return faiss_index
 
 
@@ -338,13 +338,20 @@ for emb_model_name in target_emb_models:
                 top_k_no_match_rates.append(round(no_match_rate, 4))
                 # print("accuracy: ", accuracy)
                 # append results
+            # top_k_s と top_k_accuracies を、acc@1, acc@3 のようなdict keyにする
+            top_k_accuracies = dict(
+                zip([f"acc@{k}" for k in top_k_s], top_k_accuracies)
+            )
+            # NMR@1, NMR@3 のようなdict keyにする
+            top_k_no_match_rates = dict(
+                zip([f"NMR@{k}" for k in top_k_s], top_k_no_match_rates)
+            )
             results.append(
                 {
                     "name": name,
                     "ds_target": target_split_name,
-                    "accuracies": top_k_accuracies,
-                    "no_match_rates": top_k_no_match_rates,
-                    "top_k_s": top_k_s,
+                    **top_k_accuracies,
+                    **top_k_no_match_rates,
                     "search_sec": search_sec,
                     "gen_embs_sec": gen_embs_sec,
                 }
