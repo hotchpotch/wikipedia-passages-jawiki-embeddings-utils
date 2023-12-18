@@ -19,6 +19,7 @@ import time
 from dataclasses import dataclass
 import json
 import urllib.request
+from tqdm import tqdm
 from argparse import ArgumentParser
 
 JAQKET_V1_TRAIN_URLS = [
@@ -49,6 +50,8 @@ E5_QUERY_TYPES = [
     "passage",
     "query",
 ]
+
+RERANKING_TOP_K = 100
 
 # for tokenizer
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -93,11 +96,13 @@ def get_faiss_index(
     return faiss_index
 
 
-def texts_to_embs(model, texts: list[str], prefix: str):
+def texts_to_embs(model, texts: list[str], prefix: str, show_progress_bar=True):
     texts = [prefix + text for text in texts]
     model.encode(["none"])  # warmup
     start_time = time.time()
-    embs = model.encode(texts, normalize_embeddings=True, show_progress_bar=True)
+    embs = model.encode(
+        texts, normalize_embeddings=True, show_progress_bar=show_progress_bar
+    )
     end_time = time.time()
     return embs, end_time - start_time
 
@@ -176,16 +181,59 @@ def find_label_by_indexes(idxs, jaqket: JaqketQuestionV1, wiki_ds) -> int:
 
 def predict_by_indexes(indexes, jaqket_ds, wiki_ds):
     pred_labels = []
-    for idxs, jaqket in zip(indexes, jaqket_ds):
-        pred_label = find_label_by_indexes(idxs.tolist(), jaqket, wiki_ds)
+    total = len(indexes)
+    for idxs, jaqket in tqdm(zip(indexes, jaqket_ds), total=total):
+        # tolist がある場合は実行する
+        if hasattr(idxs, "tolist"):
+            idxs = idxs.tolist()
+        pred_label = find_label_by_indexes(idxs, jaqket, wiki_ds)
         pred_labels.append(pred_label)
     return pred_labels
+
+
+def reranking_by_e5(
+    model, idxs: list[int], jaqket: JaqketQuestionV1, wiki_ds
+) -> list[int]:
+    """
+    e5 のモデルで question に近い文章を抽出し、再ランキングする
+    """
+    question = "query: " + jaqket.question
+    passages = []
+    for idx in idxs:
+        data = wiki_ds[idx]
+        title = data["title"]
+        text = data["text"]
+        section = data["section"]
+        if section == "__LEAD__":
+            section = "概要"
+        passage = f"passage: # {title}\n\n## {section}\n\n### {text}"
+        passages.append(passage)
+    target_texts = [question] + passages
+    embs, gen_embs_sec = texts_to_embs(
+        model, target_texts, prefix="", show_progress_bar=False
+    )
+    # cosine similarityでソートする
+    scores = embs[0].dot(embs[1:].T)
+    sorted_idxs = scores.argsort()[::-1]
+    # idxs を sorted_idxs 順序に並び替える
+    sorted_idxs = [idxs[i] for i in sorted_idxs]
+    return sorted_idxs
+
+
+def reranking_indexes_by_e5(model, indexes, jaqket_ds, wiki_ds, top_k: int):
+    reranked_indexes = []
+    total = len(indexes)
+    for idxs, jaqket in tqdm(zip(indexes, jaqket_ds), total=total):
+        reranked_index = reranking_by_e5(model, idxs.tolist(), jaqket, wiki_ds)
+        reranked_indexes.append(reranked_index[0:top_k])
+    return reranked_indexes
 
 
 args = ArgumentParser()
 args.add_argument("-m", "--emb_model_name", type=str, default=None)
 args.add_argument("-k", "--top_k", type=int, default=5)
 args.add_argument("-d", "--debug", action="store_true")
+args.add_argument("-r", "--reranking", action="store_true")
 args.add_argument("--use_gpu", action="store_true")
 
 parsed_args = args.parse_args()
@@ -210,6 +258,12 @@ else:
 
 top_k = parsed_args.top_k
 use_gpu = parsed_args.use_gpu
+
+# rerankingは e5 でのみ実行
+if parsed_args.reranking:
+    print("reranking is e5 only")
+    target_emb_models = [m for m in target_emb_models if "e5" in m]
+    print("reranking target_emb_models: ", target_emb_models)
 
 results = []
 
@@ -252,11 +306,18 @@ for emb_model_name in target_emb_models:
             gen_embs_sec = round(gen_embs_sec, 2)
             print("question_embs.shape: ", question_embs.shape)  # type: ignore
             print("gen embs sec: ", gen_embs_sec)
+            if parsed_args.reranking:
+                faiss_tok_k = RERANKING_TOP_K
+            else:
+                faiss_tok_k = top_k
             scores, indexes, search_sec = faiss_search_by_embs(
-                faiss_index, question_embs, top_k=top_k
+                faiss_index, question_embs, top_k=faiss_tok_k
             )
             search_sec = round(search_sec, 2)
             print("faiss search sec: ", search_sec)
+            if parsed_args.reranking:
+                print("reranking by e5")
+                indexes = reranking_indexes_by_e5(model, indexes, jaqket, ds, top_k)
             pred_labels = predict_by_indexes(indexes, jaqket, ds)
             # pred labels に含まれる、-1 (見つからなかったデータ)の割合
             no_match_rate = sum([1 for l in pred_labels if l == -1]) / len(pred_labels)
