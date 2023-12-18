@@ -6,21 +6,21 @@ $ python eval_jaqket_v1/eval_jacket_v1.py -k 5
 
 from __future__ import annotations
 
-import os
-import faiss
-from sentence_transformers import SentenceTransformer
-import torch
-import pandas as pd
-import os
-from time import time
-from datasets.download import DownloadManager
-from datasets import load_dataset  # type: ignore
-import time
-from dataclasses import dataclass
 import json
+import os
+import time
 import urllib.request
-from tqdm import tqdm
 from argparse import ArgumentParser
+from dataclasses import dataclass
+from time import time
+
+import faiss
+import pandas as pd
+import torch
+from datasets import load_dataset  # type: ignore
+from datasets.download import DownloadManager
+from sentence_transformers import SentenceTransformer
+from tqdm import tqdm
 
 JAQKET_V1_TRAIN_URLS = [
     "https://jaqket.s3.ap-northeast-1.amazonaws.com/data/aio_01/train_questions.json",
@@ -99,18 +99,18 @@ def get_faiss_index(
 def texts_to_embs(model, texts: list[str], prefix: str, show_progress_bar=True):
     texts = [prefix + text for text in texts]
     model.encode(["none"])  # warmup
-    start_time = time.time()
+    start_time = time()
     embs = model.encode(
         texts, normalize_embeddings=True, show_progress_bar=show_progress_bar
     )
-    end_time = time.time()
+    end_time = time()
     return embs, end_time - start_time
 
 
 def faiss_search_by_embs(faiss_index, embs, top_k=5):
-    start_time = time.time()
+    start_time = time()
     D, I = faiss_index.search(embs, top_k)
-    end_time = time.time()
+    end_time = time()
     search_sec = end_time - start_time
     return D, I, search_sec
 
@@ -234,22 +234,28 @@ args.add_argument("-m", "--emb_model_name", type=str, default=None)
 args.add_argument("-k", "--top_k", type=list, default=[1, 3, 5, 10, 20, 50, 100])
 args.add_argument("-d", "--debug", action="store_true")
 args.add_argument("-r", "--reranking", action="store_true")
+# target は dev or trainどちらか
+args.add_argument("-t", "--target", type=str, default="dev")
 args.add_argument("--use_gpu", action="store_true")
 
 parsed_args = args.parse_args()
 print("load wikija datasets")
 ds = get_wikija_ds()
 
-jacket_v1_dev = load_jaqket_v1(JAQKET_V1_DEV_URLS)
-# jacket_v1_train = load_jaqket_v1(JAQKET_V1_TRAIN_URLS)
+jacket_target = parsed_args.target
+if jacket_target in ["dev", "train"]:
+    pass
+else:
+    raise ValueError(f"invalid target: {jacket_target}")
+
+if jacket_target == "dev":
+    jacket_v1 = load_jaqket_v1(JAQKET_V1_DEV_URLS)
+else:
+    jacket_v1 = load_jaqket_v1(JAQKET_V1_TRAIN_URLS)
 
 if parsed_args.debug:
     print("RUN: debug mode")
-    jacket_v1_dev = jacket_v1_dev[:100]
-    # jacket_v1_train = jacket_v1_train[:100]
-
-jacket_v1 = {"dev": jacket_v1_dev}
-# jacket_v1 = {"train": jacket_v1_train, "dev": jacket_v1_dev}
+    jacket_v1 = jacket_v1[:100]
 
 if parsed_args.emb_model_name:
     target_emb_models = [parsed_args.emb_model_name]
@@ -283,7 +289,7 @@ for emb_model_name in target_emb_models:
             name = f"[debug]{name}"
         index_emb_model_name = f"{emb_model_name.split('/')[-1]}"
         if query_or_passage:
-            name = f"[{query_or_passage}]{name}"
+            name = f"{name} - {query_or_passage}"
             index_emb_model_name += f"-{query_or_passage}"
             # 検索するための prefix は元データが passage でも "query: " を指定する
             search_text_prefix = f"query: "
@@ -291,71 +297,60 @@ for emb_model_name in target_emb_models:
             # e5 以外のモデルは prefix なし
             search_text_prefix = ""
         emb_model_pq = EMB_MODEL_PQ[emb_model_name]
-        print(f"\n\n--- {name} ---")
+        print(f"--- {name} ---")
 
         print("load faiss index: ", index_emb_model_name)
         index_name = f"{index_emb_model_name}/index_IVF2048_PQ{emb_model_pq}.faiss"
         faiss_index = get_faiss_index(index_name, use_gpu=use_gpu)
 
-        for target_split_name in jacket_v1.keys():
-            jaqket = jacket_v1[target_split_name]
-            print("gen embs: ", target_split_name)
-            question_embs, gen_embs_sec = texts_to_embs(
-                model, texts=[q.question for q in jaqket], prefix=search_text_prefix
+        jaqket = jacket_v1
+        print("gen embs: ", jacket_target)
+        question_embs, gen_embs_sec = texts_to_embs(
+            model, texts=[q.question for q in jaqket], prefix=search_text_prefix
+        )
+        gen_embs_sec = round(gen_embs_sec, 2)
+        print("question_embs.shape: ", question_embs.shape)  # type: ignore
+        print("gen embs sec: ", gen_embs_sec)
+        scores, indexes, search_sec = faiss_search_by_embs(
+            faiss_index, question_embs, top_k=SEARCH_TOP_K
+        )
+        search_sec = round(search_sec, 2)
+        print("faiss search sec: ", search_sec)
+        if parsed_args.reranking:
+            print("reranking by e5")
+            indexes = reranking_indexes_by_e5(model, indexes, jaqket, ds, SEARCH_TOP_K)
+        top_k_accuracies = []
+        top_k_no_match_rates = []
+        for top_k in top_k_s:
+            target_indexes = indexes[:, 0:top_k]  # type: ignore
+            pred_labels = predict_by_indexes(target_indexes, jaqket, ds)
+            # pred labels に含まれる、-1 (見つからなかったデータ)の割合
+            no_match_rate = sum([1 for l in pred_labels if l == -1]) / len(pred_labels)
+            # print("no match rate: ", no_match_rate)
+            correct_count = sum(
+                [
+                    1 if pred_label == q.label else 0
+                    for pred_label, q in zip(pred_labels, jaqket)
+                ]
             )
-            gen_embs_sec = round(gen_embs_sec, 2)
-            print("question_embs.shape: ", question_embs.shape)  # type: ignore
-            print("gen embs sec: ", gen_embs_sec)
-            scores, indexes, search_sec = faiss_search_by_embs(
-                faiss_index, question_embs, top_k=SEARCH_TOP_K
-            )
-            search_sec = round(search_sec, 2)
-            print("faiss search sec: ", search_sec)
-            if parsed_args.reranking:
-                print("reranking by e5")
-                indexes = reranking_indexes_by_e5(
-                    model, indexes, jaqket, ds, SEARCH_TOP_K
-                )
-            top_k_accuracies = []
-            top_k_no_match_rates = []
-            for top_k in top_k_s:
-                target_indexes = indexes[:, 0:top_k]  # type: ignore
-                pred_labels = predict_by_indexes(target_indexes, jaqket, ds)
-                # pred labels に含まれる、-1 (見つからなかったデータ)の割合
-                no_match_rate = sum([1 for l in pred_labels if l == -1]) / len(
-                    pred_labels
-                )
-                # print("no match rate: ", no_match_rate)
-                correct_count = sum(
-                    [
-                        1 if pred_label == q.label else 0
-                        for pred_label, q in zip(pred_labels, jaqket)
-                    ]
-                )
-                accuracy = correct_count / len(jaqket)
-                # acc, no_match_rate を 0.xxxx に丸める
-                top_k_accuracies.append(round(accuracy, 4))
-                top_k_no_match_rates.append(round(no_match_rate, 4))
-                # print("accuracy: ", accuracy)
-                # append results
-            # top_k_s と top_k_accuracies を、acc@1, acc@3 のようなdict keyにする
-            top_k_accuracies = dict(
-                zip([f"acc@{k}" for k in top_k_s], top_k_accuracies)
-            )
-            # NMR@1, NMR@3 のようなdict keyにする
-            top_k_no_match_rates = dict(
-                zip([f"NMR@{k}" for k in top_k_s], top_k_no_match_rates)
-            )
-            results.append(
-                {
-                    "name": name,
-                    "ds_target": target_split_name,
-                    **top_k_accuracies,
-                    **top_k_no_match_rates,
-                    "search_sec": search_sec,
-                    "gen_embs_sec": gen_embs_sec,
-                }
-            )
+            accuracy = correct_count / len(jaqket)
+            # acc, no_match_rate を 0.xxxx に丸める
+            top_k_accuracies.append(round(accuracy, 4))
+            top_k_no_match_rates.append(round(no_match_rate, 4))
+        top_k_accuracies = dict(zip([f"acc@{k}" for k in top_k_s], top_k_accuracies))
+        top_k_no_match_rates = dict(
+            zip([f"NMR@{k}" for k in top_k_s], top_k_no_match_rates)
+        )
+        results.append(
+            {
+                "name": name,
+                "target": jacket_target,
+                **top_k_accuracies,
+                **top_k_no_match_rates,
+                "search_sec": search_sec,
+                "gen_embs_sec": gen_embs_sec,
+            }
+        )
         del faiss_index
         torch.cuda.empty_cache()
     del model
@@ -369,6 +364,9 @@ print(df)
 
 # csv で保存
 if parsed_args.debug:
-    df.to_csv(f"eval_jaqket_debug_top_{top_k}.csv", index=False)
+    filename = f"eval_jaqket_{jacket_target}_debug.csv"
 else:
-    df.to_csv(f"eval_jaqket_top_{top_k}.csv", index=False)
+    filename = f"eval_jaqket_{jacket_target}.csv"
+
+print("save csv: ", filename)
+df.to_csv(filename, index=False)
