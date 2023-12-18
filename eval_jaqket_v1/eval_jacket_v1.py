@@ -51,7 +51,7 @@ E5_QUERY_TYPES = [
     "query",
 ]
 
-RERANKING_TOP_K = 100
+SEARCH_TOP_K = 100
 
 # for tokenizer
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -92,7 +92,7 @@ def get_faiss_index(
         # 16 bit float (this is due to the limited temporary memory).
         co.useFloat16 = True
         faiss_index = faiss.index_cpu_to_gpu(gpu_res, 0, faiss_index, co)
-    faiss_index.nprobe = 256
+    faiss_index.nprobe = 512
     return faiss_index
 
 
@@ -159,7 +159,7 @@ def find_label_by_indexes(idxs, jaqket: JaqketQuestionV1, wiki_ds) -> int:
     candidate_found_indexes = []
     titles = []
     texts = []
-    for idx in idxs:
+    for idx in idxs[0:top_k]:
         data = wiki_ds[idx]
         title = data["title"]
         text = data["text"]
@@ -231,7 +231,7 @@ def reranking_indexes_by_e5(model, indexes, jaqket_ds, wiki_ds, top_k: int):
 
 args = ArgumentParser()
 args.add_argument("-m", "--emb_model_name", type=str, default=None)
-args.add_argument("-k", "--top_k", type=int, default=5)
+args.add_argument("-k", "--top_k", type=list, default=[1, 3, 5, 10, 20, 50, 100])
 args.add_argument("-d", "--debug", action="store_true")
 args.add_argument("-r", "--reranking", action="store_true")
 args.add_argument("--use_gpu", action="store_true")
@@ -256,7 +256,7 @@ if parsed_args.emb_model_name:
 else:
     target_emb_models = EMB_MODEL_NAMES
 
-top_k = parsed_args.top_k
+top_k_s = parsed_args.top_k
 use_gpu = parsed_args.use_gpu
 
 # rerankingは e5 でのみ実行
@@ -306,38 +306,45 @@ for emb_model_name in target_emb_models:
             gen_embs_sec = round(gen_embs_sec, 2)
             print("question_embs.shape: ", question_embs.shape)  # type: ignore
             print("gen embs sec: ", gen_embs_sec)
-            if parsed_args.reranking:
-                faiss_tok_k = RERANKING_TOP_K
-            else:
-                faiss_tok_k = top_k
             scores, indexes, search_sec = faiss_search_by_embs(
-                faiss_index, question_embs, top_k=faiss_tok_k
+                faiss_index, question_embs, top_k=SEARCH_TOP_K
             )
             search_sec = round(search_sec, 2)
             print("faiss search sec: ", search_sec)
             if parsed_args.reranking:
                 print("reranking by e5")
-                indexes = reranking_indexes_by_e5(model, indexes, jaqket, ds, top_k)
-            pred_labels = predict_by_indexes(indexes, jaqket, ds)
-            # pred labels に含まれる、-1 (見つからなかったデータ)の割合
-            no_match_rate = sum([1 for l in pred_labels if l == -1]) / len(pred_labels)
-            print("no match rate: ", no_match_rate)
-            correct_count = sum(
-                [
-                    1 if pred_label == q.label else 0
-                    for pred_label, q in zip(pred_labels, jaqket)
-                ]
-            )
-            accuracy = correct_count / len(jaqket)
-            print("accuracy: ", accuracy)
-            # append results
+                indexes = reranking_indexes_by_e5(
+                    model, indexes, jaqket, ds, SEARCH_TOP_K
+                )
+            top_k_accuracies = []
+            top_k_no_match_rates = []
+            for top_k in top_k_s:
+                target_indexes = indexes[:, 0:top_k]  # type: ignore
+                pred_labels = predict_by_indexes(target_indexes, jaqket, ds)
+                # pred labels に含まれる、-1 (見つからなかったデータ)の割合
+                no_match_rate = sum([1 for l in pred_labels if l == -1]) / len(
+                    pred_labels
+                )
+                # print("no match rate: ", no_match_rate)
+                correct_count = sum(
+                    [
+                        1 if pred_label == q.label else 0
+                        for pred_label, q in zip(pred_labels, jaqket)
+                    ]
+                )
+                accuracy = correct_count / len(jaqket)
+                # acc, no_match_rate を 0.xxxx に丸める
+                top_k_accuracies.append(round(accuracy, 4))
+                top_k_no_match_rates.append(round(no_match_rate, 4))
+                # print("accuracy: ", accuracy)
+                # append results
             results.append(
                 {
                     "name": name,
                     "ds_target": target_split_name,
-                    "accuracy": accuracy,
-                    "no_match_rate": no_match_rate,
-                    "top_k": top_k,
+                    "accuracies": top_k_accuracies,
+                    "no_match_rates": top_k_no_match_rates,
+                    "top_k_s": top_k_s,
                     "search_sec": search_sec,
                     "gen_embs_sec": gen_embs_sec,
                 }
