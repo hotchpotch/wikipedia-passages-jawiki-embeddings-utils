@@ -5,8 +5,6 @@ $ python all_embs_to_faiss.py -w $WORKING_DIR --use_gpu
 
 """
 
-# ToDo: dim をみてPQをセットする?
-
 import argparse
 import subprocess
 import sys
@@ -62,6 +60,11 @@ if __name__ == "__main__":
         with np.load(npz_file) as data:
             e = data["embs"]
         dim = e.shape[1]
+
+        # dim が96よりも高いなら、other_args に --use_gpu があれば削除
+        if dim > 96:
+            if "--use_gpu" in other_args:
+                other_args.remove("--use_gpu")
 
         target_embs_name = "/".join(str(d).split("/")[-2:])
         print(f"target_embs_name: {target_embs_name}")

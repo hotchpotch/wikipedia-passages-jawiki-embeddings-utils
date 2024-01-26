@@ -196,10 +196,10 @@ def ds_to_embs(
 
 if torch.cuda.is_available():
     print("use cuda")
-    MODEL.to("cuda")
+    MODEL.to("cuda")  # type: ignore
 elif torch.backends.mps.is_available():  # type: ignore
     print("use mps (apple selicon)")
-    MODEL.to("mps")
+    MODEL.to("mps")  # type: ignore
 else:
     print("!! Warning: use cpu")
 
