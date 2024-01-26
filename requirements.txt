@@ -2,3 +2,6 @@ datasets
 sentence_transformers
 faiss-gpu
 hf-hub-ctranslate2
+tiktoken
+langchain
+langchain-openai
