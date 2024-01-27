@@ -157,6 +157,10 @@ def ds_to_embs(
     pbar = tqdm(total=total)
     # text は group_size 件ごとに処理する
     for i in range(0, total, group_size):
+        if get_npz_file_path(i).exists():
+            pbar.update(group_size)
+            yield None, i, pbar
+            continue
         texts = []
         for data in ds.select(range(i, min(i + group_size, total))):
             data: dict = data
@@ -181,6 +185,12 @@ def count_tokens_data(ds) -> int:
     return total
 
 
+def get_npz_file_path(idx: int) -> Path:
+    filename = f"{idx}.npz"
+    filepath = working_dir_embs_path / filename
+    return filepath
+
+
 ds = target_ds  # type: ignore
 
 if args.debug:
@@ -198,8 +208,10 @@ if args.only_count_tokens:
     print("total tokens:", total)
 else:
     for embs, idx, pbar in ds_to_embs(ds, data_to_passage, group_size=group_size):
-        filename = f"{idx}.npz"
-        filepath = working_dir_embs_path / filename
+        filepath = get_npz_file_path(idx)
+        if embs is None:
+            print("skip, file exists:", filepath)
+            continue
         pbar.desc = f"saving...: {str(filepath)}"
         np.savez_compressed(filepath, embs=embs.astype(np.float16))
         pbar.desc = ""
