@@ -1,10 +1,12 @@
 from __future__ import annotations
+
+import argparse
 from dataclasses import dataclass
+from pathlib import Path
+
+import faiss
 import numpy as np
 from tqdm import tqdm
-import argparse
-from pathlib import Path
-import faiss
 
 parser = argparse.ArgumentParser(
     description="Convert embs to faiss index",
@@ -75,12 +77,12 @@ def get_index_filename(factory_name: str) -> str:
 def gen_faiss_index(factory_name: str, dim: int, use_gpu: bool):
     faiss_index = faiss.index_factory(dim, factory_name)
     if use_gpu:  # and getattr(faiss, "StandardGpuResources", None):
-        gpu_res = faiss.StandardGpuResources()
-        co = faiss.GpuClonerOptions()
+        gpu_res = faiss.StandardGpuResources()  # type: ignore
+        co = faiss.GpuClonerOptions()  # type: ignore
         # here we are using a over 64-byte PQ, so we must set the lookup tables to
         # 16 bit float (this is due to the limited temporary memory).
         co.useFloat16 = True
-        faiss_index = faiss.index_cpu_to_gpu(gpu_res, 0, faiss_index, co)
+        faiss_index = faiss.index_cpu_to_gpu(gpu_res, 0, faiss_index, co)  # type: ignore
         return faiss_index
     else:
         return faiss_index

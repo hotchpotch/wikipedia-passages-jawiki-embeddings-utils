@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.request
 from argparse import ArgumentParser
@@ -15,12 +16,17 @@ from dataclasses import dataclass
 from time import time
 
 import faiss
+import numpy as np
 import pandas as pd
 import torch
 from datasets import load_dataset  # type: ignore
 from datasets.download import DownloadManager
+from langchain_openai import OpenAIEmbeddings
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
+
+# from sentence_transformers import SentenceTransformer
+
 
 JAQKET_V1_TRAIN_URLS = [
     "https://jaqket.s3.ap-northeast-1.amazonaws.com/data/aio_01/train_questions.json",
@@ -42,6 +48,7 @@ EMB_MODEL_PQ = {
     "intfloat/multilingual-e5-large": 256,
     "cl-nagoya/sup-simcse-ja-base": 192,
     "pkshatech/GLuCoSE-base-ja": 192,
+    "text-embedding-3-small-dim512": 128,
 }
 
 EMB_MODEL_NAMES = list(EMB_MODEL_PQ.keys())
@@ -58,18 +65,55 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 def get_model(name: str, max_seq_length=512):
-    device = "cpu"
-    if torch.cuda.is_available():
-        device = "cuda"
-    elif torch.backends.mps.is_available():
-        device = "mps"
-    model = SentenceTransformer(name, device=device)
-    model.max_seq_length = max_seq_length
-    return model
+    if name.startswith("text-embedding"):
+        # text-embedding は text-embedding-3-small-dim512 と後ろに dim がついている
+        # -dim{n} を正規表現で取得する
+        m = re.search(r"-dim(\d+)$", name)
+        if m:
+            target_dim = int(m.group(1))
+        else:
+            raise ValueError(f"invalid model name: {name}")
+        # -dim{n} を削除する
+        name = name.replace(f"-dim{target_dim}", "")
+        model = OpenAIEmbeddings(
+            model=name, tiktoken_model_name="cl100k_base", dimensions=target_dim
+        )
+
+        def model_to_embs_oai(texts: list[str]):
+            # texts を　１０００個ずつに分割して、embs を取得する
+            embs = []
+            for i in range(0, len(texts), 1000):
+                embs += model.embed_documents(texts[i : i + 1000])
+            embs = model.embed_documents(texts)
+            # to numpy
+            embs = np.array(embs)
+            return embs
+
+        return model_to_embs_oai
+    else:
+        device = "cpu"
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif torch.backends.mps.is_available():
+            device = "mps"
+        model = SentenceTransformer(name, device=device)
+        model.max_seq_length = max_seq_length
+        model.encode(["none"])  # warmup
+
+        def model_to_embs(texts: list[str]):
+            embs = model.encode(
+                texts,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+                convert_to_numpy=True,
+            )
+            return embs
+
+        return model_to_embs
 
 
 def get_wikija_ds(name: str = WIKIPEDIA_JS_DS_NAME):
-    ds = load_dataset(path=WIKIPEDIA_JA_DS, name=name, split="train")
+    ds = load_dataset(path=WIKIPEDIA_JA_DS, name=name, split="train")  # type: ignore
     return ds
 
 
@@ -80,29 +124,31 @@ def get_faiss_index(
     use_gpu=False,
 ):
     target_path = f"faiss_indexes/{name}/{index_name}"
+    # XXX: あとで直す
     dm = DownloadManager()
     index_local_path = dm.download(
         f"https://huggingface.co/datasets/{ja_emb_ds}/resolve/main/{target_path}"
     )
+    # index_local_path = (
+    #     "/home/yu1/src/huggingface.co/datasets/hotchpotch/wikipedia-passages-jawiki-embeddings/"
+    #     + target_path
+    # )
     faiss_index = faiss.read_index(index_local_path)
     if use_gpu:  # and getattr(faiss, "StandardGpuResources", None):
-        gpu_res = faiss.StandardGpuResources()
-        co = faiss.GpuClonerOptions()
+        gpu_res = faiss.StandardGpuResources()  # type: ignore
+        co = faiss.GpuClonerOptions()  # type: ignore
         # here we are using a over 64-byte PQ, so we must set the lookup tables to
         # 16 bit float (this is due to the limited temporary memory).
         co.useFloat16 = True
-        faiss_index = faiss.index_cpu_to_gpu(gpu_res, 0, faiss_index, co)
+        faiss_index = faiss.index_cpu_to_gpu(gpu_res, 0, faiss_index, co)  # type: ignore
     faiss_index.nprobe = 256
     return faiss_index
 
 
-def texts_to_embs(model, texts: list[str], prefix: str, show_progress_bar=True):
+def texts_to_embs(model_to_embs_fn, texts: list[str], prefix: str):
     texts = [prefix + text for text in texts]
-    model.encode(["none"])  # warmup
     start_time = time()
-    embs = model.encode(
-        texts, normalize_embeddings=True, show_progress_bar=show_progress_bar
-    )
+    embs = model_to_embs_fn(texts)
     end_time = time()
     return embs, end_time - start_time
 
@@ -192,7 +238,7 @@ def predict_by_indexes(indexes, jaqket_ds, wiki_ds):
 
 
 def reranking_by_e5(
-    model, idxs: list[int], jaqket: JaqketQuestionV1, wiki_ds
+    model_to_embs_fn, idxs: list[int], jaqket: JaqketQuestionV1, wiki_ds
 ) -> list[int]:
     """
     e5 のモデルで question に近い文章を抽出し、再ランキングする
@@ -209,9 +255,7 @@ def reranking_by_e5(
         passage = f"passage: # {title}\n\n## {section}\n\n### {text}"
         passages.append(passage)
     target_texts = [question] + passages
-    embs, gen_embs_sec = texts_to_embs(
-        model, target_texts, prefix="", show_progress_bar=False
-    )
+    embs, gen_embs_sec = texts_to_embs(model_to_embs_fn, target_texts, prefix="")
     # cosine similarityでソートする
     scores = embs[0].dot(embs[1:].T)
     sorted_idxs = scores.argsort()[::-1]
@@ -220,11 +264,13 @@ def reranking_by_e5(
     return sorted_idxs
 
 
-def reranking_indexes_by_e5(model, indexes, jaqket_ds, wiki_ds, top_k: int):
+def reranking_indexes_by_e5(model_to_embs_fn, indexes, jaqket_ds, wiki_ds, top_k: int):
     reranked_indexes = []
     total = len(indexes)
     for idxs, jaqket in tqdm(zip(indexes, jaqket_ds), total=total):
-        reranked_index = reranking_by_e5(model, idxs.tolist(), jaqket, wiki_ds)
+        reranked_index = reranking_by_e5(
+            model_to_embs_fn, idxs.tolist(), jaqket, wiki_ds
+        )
         reranked_indexes.append(reranked_index[0:top_k])
     return reranked_indexes
 
@@ -280,8 +326,7 @@ for emb_model_name in target_emb_models:
         query_passage = [""]
 
     print("load model: ", emb_model_name)
-    model = get_model(emb_model_name)
-    model.max_seq_length = 512
+    model_to_embs_fn = get_model(emb_model_name)
 
     for query_or_passage in query_passage:
         name = f"{emb_model_name}"
@@ -306,7 +351,9 @@ for emb_model_name in target_emb_models:
         jaqket = jacket_v1
         print("gen embs: ", jacket_target)
         question_embs, gen_embs_sec = texts_to_embs(
-            model, texts=[q.question for q in jaqket], prefix=search_text_prefix
+            model_to_embs_fn,
+            texts=[q.question for q in jaqket],
+            prefix=search_text_prefix,
         )
         gen_embs_sec = round(gen_embs_sec, 2)
         print("question_embs.shape: ", question_embs.shape)  # type: ignore
@@ -318,7 +365,9 @@ for emb_model_name in target_emb_models:
         print("faiss search sec: ", search_sec)
         if parsed_args.reranking:
             print("reranking by e5")
-            indexes = reranking_indexes_by_e5(model, indexes, jaqket, ds, SEARCH_TOP_K)
+            indexes = reranking_indexes_by_e5(
+                model_to_embs_fn, indexes, jaqket, ds, SEARCH_TOP_K
+            )
         top_k_accuracies = []
         top_k_no_match_rates = []
         for top_k in top_k_s:
@@ -353,7 +402,7 @@ for emb_model_name in target_emb_models:
         )
         del faiss_index
         torch.cuda.empty_cache()
-    del model
+    del model_to_embs_fn
     torch.cuda.empty_cache()
 
 
