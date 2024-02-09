@@ -366,6 +366,7 @@ else:
     target_emb_models = EMB_MODEL_NAMES
 
 top_k_s = parsed_args.top_k
+top_k_s = [k for k in top_k_s if k <= SEARCH_TOP_K]
 use_gpu = parsed_args.use_gpu
 
 # rerankingは e5 でのみ実行
