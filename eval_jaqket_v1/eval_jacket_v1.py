@@ -13,6 +13,7 @@ import time
 import urllib.request
 from argparse import ArgumentParser
 from dataclasses import dataclass
+from functools import lru_cache
 from time import time
 
 import faiss
@@ -22,7 +23,7 @@ import torch
 from datasets import load_dataset  # type: ignore
 from datasets.download import DownloadManager
 from langchain_openai import OpenAIEmbeddings
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import CrossEncoder, SentenceTransformer
 from tqdm import tqdm
 
 # from sentence_transformers import SentenceTransformer
@@ -58,10 +59,22 @@ E5_QUERY_TYPES = [
     "query",
 ]
 
+CROSS_ENCODER_MODEL_NAME = "corrius/cross-encoder-mmarco-mMiniLMv2-L12-H384-v1"
+
+
 SEARCH_TOP_K = 100
 
 # for tokenizer
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+
+def get_device_name():
+    if torch.cuda.is_available():
+        return "cuda"
+    elif torch.backends.mps.is_available():
+        return "mps"
+    else:
+        return "cpu"
 
 
 def get_model(name: str, max_seq_length=512):
@@ -91,11 +104,7 @@ def get_model(name: str, max_seq_length=512):
 
         return model_to_embs_oai
     else:
-        device = "cpu"
-        if torch.cuda.is_available():
-            device = "cuda"
-        elif torch.backends.mps.is_available():
-            device = "mps"
+        device = get_device_name()
         model = SentenceTransformer(name, device=device)
         model.max_seq_length = max_seq_length
         model.encode(["none"])  # warmup
@@ -275,11 +284,59 @@ def reranking_indexes_by_e5(model_to_embs_fn, indexes, jaqket_ds, wiki_ds, top_k
     return reranked_indexes
 
 
+@lru_cache(maxsize=None)
+def get_cross_encoder(model_name=CROSS_ENCODER_MODEL_NAME):
+    device = get_device_name()
+    model = CrossEncoder(
+        model_name,
+        max_length=512,
+        device=device,
+    )
+    return model
+
+
+def reranking_by_cross_encoder(
+    idxs: list[int], jaqket: JaqketQuestionV1, wiki_ds
+) -> list[int]:
+    """
+    cross encoder モデルで question に近い文章を抽出し、再ランキングする
+    """
+    model = get_cross_encoder()
+    question = jaqket.question
+    passages = []
+    for idx in idxs:
+        data = wiki_ds[idx]
+        title = data["title"]
+        text = data["text"]
+        section = data["section"]
+        if section == "__LEAD__":
+            section = "概要"
+        passage = f"{title} {section} {text}"
+        passages.append(passage)
+    target_texts_pairs = [(question, p) for p in passages]
+    scores = model.predict(target_texts_pairs)
+    sorted_idxs = scores.argsort()[::-1]
+    # idxs を sorted_idxs 順序に並び替える
+    sorted_idxs = [idxs[i] for i in sorted_idxs]
+    return sorted_idxs
+
+
+def reranking_indexes_by_cross_encoder(indexes, jaqket_ds, wiki_ds, top_k: int):
+    reranked_indexes = []
+    total = len(indexes)
+    for idxs, jaqket in tqdm(zip(indexes, jaqket_ds), total=total):
+        reranked_index = reranking_by_cross_encoder(idxs.tolist(), jaqket, wiki_ds)
+        reranked_indexes.append(reranked_index[0:top_k])
+    reranked_indexes = np.array(reranked_indexes)
+    return reranked_indexes
+
+
 args = ArgumentParser()
 args.add_argument("-m", "--emb_model_name", type=str, default=None)
 args.add_argument("-k", "--top_k", type=list, default=[1, 3, 5, 10, 20, 50, 100])
 args.add_argument("-d", "--debug", action="store_true")
 args.add_argument("-r", "--reranking", action="store_true")
+args.add_argument("--cross_encoder_reranking", action="store_true")
 # target は dev or trainどちらか
 args.add_argument("-t", "--target", type=str, default="dev")
 args.add_argument("--use_gpu", action="store_true")
@@ -367,6 +424,11 @@ for emb_model_name in target_emb_models:
             print("reranking by e5")
             indexes = reranking_indexes_by_e5(
                 model_to_embs_fn, indexes, jaqket, ds, SEARCH_TOP_K
+            )
+        if parsed_args.cross_encoder_reranking:
+            print("cross encoder reranking")
+            indexes = reranking_indexes_by_cross_encoder(
+                indexes, jaqket, ds, SEARCH_TOP_K
             )
         top_k_accuracies = []
         top_k_no_match_rates = []
