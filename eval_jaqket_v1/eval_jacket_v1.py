@@ -59,13 +59,26 @@ E5_QUERY_TYPES = [
     "query",
 ]
 
-CROSS_ENCODER_MODEL_NAME = "corrius/cross-encoder-mmarco-mMiniLMv2-L12-H384-v1"
+DEFAULT_CROSS_ENCODER_MODEL_NAME = "corrius/cross-encoder-mmarco-mMiniLMv2-L12-H384-v1"
 
 
 SEARCH_TOP_K = 100
 
 # for tokenizer
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+args = ArgumentParser()
+args.add_argument("-m", "--emb_model_name", type=str, default=None)
+args.add_argument("-k", "--top_k", type=list, default=[1, 3, 5, 10, 20, 50, 100])
+args.add_argument("-d", "--debug", action="store_true")
+args.add_argument("-r", "--reranking", action="store_true")
+args.add_argument("-c", "--cross_encoder_reranking", type=str, default=None)
+# target は dev or trainどちらか
+args.add_argument("-t", "--target", type=str, default="dev")
+args.add_argument("--use_gpu", action="store_true")
+args.add_argument("--query_prefix", type=str, default=None)
+
+parsed_args = args.parse_args()
 
 
 def get_device_name():
@@ -285,7 +298,7 @@ def reranking_indexes_by_e5(model_to_embs_fn, indexes, jaqket_ds, wiki_ds, top_k
 
 
 @lru_cache(maxsize=None)
-def get_cross_encoder(model_name=CROSS_ENCODER_MODEL_NAME):
+def get_cross_encoder(model_name=parsed_args.cross_encoder_reranking):
     device = get_device_name()
     model = CrossEncoder(
         model_name,
@@ -331,17 +344,6 @@ def reranking_indexes_by_cross_encoder(indexes, jaqket_ds, wiki_ds, top_k: int):
     return reranked_indexes
 
 
-args = ArgumentParser()
-args.add_argument("-m", "--emb_model_name", type=str, default=None)
-args.add_argument("-k", "--top_k", type=list, default=[1, 3, 5, 10, 20, 50, 100])
-args.add_argument("-d", "--debug", action="store_true")
-args.add_argument("-r", "--reranking", action="store_true")
-args.add_argument("--cross_encoder_reranking", action="store_true")
-# target は dev or trainどちらか
-args.add_argument("-t", "--target", type=str, default="dev")
-args.add_argument("--use_gpu", action="store_true")
-
-parsed_args = args.parse_args()
 print("load wikija datasets")
 ds = get_wikija_ds()
 
@@ -380,6 +382,8 @@ results = []
 for emb_model_name in target_emb_models:
     if "-e5-" in emb_model_name:
         query_passage = ["query", "passage"]
+        if parsed_args.query_prefix in query_passage:
+            query_passage = [parsed_args.query_prefix]
     else:
         query_passage = [""]
 
@@ -476,9 +480,14 @@ print(df)
 
 # csv で保存
 if parsed_args.debug:
-    filename = f"eval_jaqket_{jacket_target}_debug.csv"
+    filename = f"eval_jaqket_{jacket_target}_debug"
 else:
-    filename = f"eval_jaqket_{jacket_target}.csv"
+    filename = f"eval_jaqket_{jacket_target}"
 
+if parsed_args.cross_encoder_reranking:
+    filename_ce_name = parsed_args.cross_encoder_reranking.split("/")[-1]
+    filename += "_ce_" + filename_ce_name
+
+filename = filename + ".csv"
 print("save csv: ", filename)
 df.to_csv(filename, index=False)
