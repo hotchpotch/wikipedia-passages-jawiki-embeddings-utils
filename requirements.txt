@@ -5,3 +5,4 @@ hf-hub-ctranslate2
 tiktoken
 langchain
 langchain-openai
+ragatouille

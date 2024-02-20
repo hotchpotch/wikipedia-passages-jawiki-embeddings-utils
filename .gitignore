@@ -162,3 +162,4 @@ cython_debug/
 outputs/*
 ignore_*
 eval_jaqket*.csv
+.ragatouille/*
