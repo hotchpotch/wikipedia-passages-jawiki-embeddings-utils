@@ -300,12 +300,20 @@ def reranking_indexes_by_e5(model_to_embs_fn, indexes, jaqket_ds, wiki_ds, top_k
 @lru_cache(maxsize=None)
 def get_cross_encoder(model_name=parsed_args.cross_encoder_reranking):
     device = get_device_name()
-    model = CrossEncoder(
-        model_name,
-        max_length=512,
-        device=device,
-    )
-    return model
+    if "bge-reranker" in model_name:
+        from FlagEmbedding import FlagReranker
+
+        reranker = FlagReranker(model_name, use_fp16=True)
+        reranker.device = device
+        reranker.predict = reranker.compute_score
+        return reranker
+    else:
+        model = CrossEncoder(
+            model_name,
+            max_length=512,
+            device=device,
+        )
+        return model
 
 
 def reranking_by_cross_encoder(
@@ -328,6 +336,7 @@ def reranking_by_cross_encoder(
         passages.append(passage)
     target_texts_pairs = [(question, p) for p in passages]
     scores = model.predict(target_texts_pairs)
+    scores = np.array(scores)
     sorted_idxs = scores.argsort()[::-1]
     # idxs を sorted_idxs 順序に並び替える
     sorted_idxs = [idxs[i] for i in sorted_idxs]

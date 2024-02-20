@@ -163,3 +163,4 @@ outputs/*
 ignore_*
 eval_jaqket*.csv
 .ragatouille/*
+workdir/*
