@@ -22,6 +22,7 @@ import pandas as pd
 import torch
 from datasets import load_dataset  # type: ignore
 from datasets.download import DownloadManager
+from FlagEmbedding import BGEM3FlagModel
 from langchain_openai import OpenAIEmbeddings
 from sentence_transformers import CrossEncoder, SentenceTransformer
 from tqdm import tqdm
@@ -49,6 +50,7 @@ EMB_MODEL_PQ = {
     "intfloat/multilingual-e5-large": 256,
     "cl-nagoya/sup-simcse-ja-base": 192,
     "pkshatech/GLuCoSE-base-ja": 192,
+    "BAAI/bge-m3": 256,
     "text-embedding-3-small-dim512": 128,
 }
 
@@ -116,6 +118,24 @@ def get_model(name: str, max_seq_length=512):
             return embs
 
         return model_to_embs_oai
+    elif "bge-m3" in name:
+        model = BGEM3FlagModel(
+            name,
+            use_fp16=True,
+        )
+
+        def model_to_embs_bge_m3(texts: list[str]):
+            embs = model.encode(
+                texts,
+                max_length=512,
+                batch_size=128,
+                return_dense=True,
+                return_sparse=False,
+                return_colbert_vecs=False,
+            )["dense_vecs"]
+            return embs
+
+        return model_to_embs_bge_m3
     else:
         device = get_device_name()
         model = SentenceTransformer(name, device=device)
