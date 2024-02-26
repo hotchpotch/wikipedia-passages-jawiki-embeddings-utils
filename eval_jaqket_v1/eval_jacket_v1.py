@@ -333,6 +333,8 @@ def get_cross_encoder(model_name=parsed_args.cross_encoder_reranking):
             max_length=512,
             device=device,
         )
+        if "cuda" in device:
+            model.model.half()
         return model
 
 
