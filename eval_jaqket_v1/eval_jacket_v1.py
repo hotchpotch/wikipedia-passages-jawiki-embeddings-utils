@@ -39,6 +39,10 @@ JAQKET_V1_DEV_URLS = [
     "https://jaqket.s3.ap-northeast-1.amazonaws.com/data/aio_01/dev2_questions.json",
 ]
 
+JAQKET_V1_TEST_URLS = [
+    "https://jaqket.s3.ap-northeast-1.amazonaws.com/data/aio_02/aio_01_test.jsonl",
+]
+
 
 WIKIPEDIA_JA_DS = "singletongue/wikipedia-utils"
 WIKIPEDIA_JS_DS_NAME = "passages-c400-jawiki-20230403"
@@ -75,7 +79,7 @@ args.add_argument("-k", "--top_k", type=list, default=[1, 3, 5, 10, 20, 50, 100]
 args.add_argument("-d", "--debug", action="store_true")
 args.add_argument("-r", "--reranking", action="store_true")
 args.add_argument("-c", "--cross_encoder_reranking", type=str, default=None)
-# target は dev or trainどちらか
+# target は dev or train or test
 args.add_argument("-t", "--target", type=str, default="dev")
 args.add_argument("--use_gpu", action="store_true")
 args.add_argument("--query_prefix", type=str, default=None)
@@ -222,7 +226,13 @@ def load_jaqket_v1(urls):
             data = [json.loads(line.decode("utf-8")) for line in f]
         for d in data:
             # label position
-            d["label"] = d["answer_candidates"].index(d["answer_entity"])
+            if d.get("answer_candidates"):
+                d["label"] = d["answer_candidates"].index(d["answer_entity"])
+            else:
+                # target is test
+                d["answer_candidates"] = d["answers"]
+                d["label"] = 0
+                d["answer_entity"] = d["answers"][d["label"]]
             # if -1
             if d["label"] == -1:
                 raise ValueError(
@@ -379,13 +389,15 @@ print("load wikija datasets")
 ds = get_wikija_ds()
 
 jacket_target = parsed_args.target
-if jacket_target in ["dev", "train"]:
+if jacket_target in ["dev", "train", "test"]:
     pass
 else:
     raise ValueError(f"invalid target: {jacket_target}")
 
 if jacket_target == "dev":
     jacket_v1 = load_jaqket_v1(JAQKET_V1_DEV_URLS)
+elif jacket_target == "test":
+    jacket_v1 = load_jaqket_v1(JAQKET_V1_TEST_URLS)
 else:
     jacket_v1 = load_jaqket_v1(JAQKET_V1_TRAIN_URLS)
 
